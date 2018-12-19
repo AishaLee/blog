@@ -1,0 +1,726 @@
+# 原生JavaScript插件编写指南 初版
+
+原文地址：https://www.jianshu.com/p/e65c246beac1
+
+一个可复用的插件需要满足以下条件：
+
+1. 插件自身的作用域与用户当前的作用域相互独立，也就是插件内部的私有变量不能影响使用者的环境变量
+2. 插件需要有自己的默认参数，即不管我们是否传有参数，我们都应该返回一个值以告诉用户我们做了怎样的处理
+3. 插件除了具备已实现的基本功能外，需要提供部分API，使用者可以通过该API修改插件功能的默认参数，从而实现用户自定义插件的效果
+4. 插件需要支持链式调用
+5. 插件需要提供监听入口，针对制定元素进行监听，使得该元素与插件响应达到插件效果
+
+## 插件自身的作用域
+### 使用闭包的模式包装
+
+实现私有作用域最好的方法就是使用闭包。闭包的作用就是延长函数内部变量的生命周期，使得函数可以重复调用，而不影响使用者的作用域。可以把插件当做一个函数，插件内部的变量及函数的私有变量，在调用插件后依旧能使用其功能。故而需要将插件的所有功能写在一个立即执行函数中：
+
+```JavaScript
+  ;(fucntion (global, undefined) {
+    var plugin = {
+      // 属性及方法
+    };
+
+    // 最后将插件对象暴露给全局对象
+    !('plugin' in global) && (global.plugin = plugin);
+  })(window);
+```
+
+对上面的代码进行解释一下：
+
+1. 在定义插件之前添加一个分号，可以解决`JavaScript`合并时可能会产生的错误问题
+2. `undefined`在老一辈的浏览器是不被支持的，直接使用会报错，`JavaScript`框架考虑到兼容性，增加一个形参`undefined`，就算有人把外面的`undefined`定义了，里面的`undefined`依然不受影响
+3. 把`window`对象作为参数传入，是避免了函数执行的时候到外部去查找
+4. `in`操作符，如果指定的属性在指定的对象或其原型链中，返回`true`；其语法是：prop(属性名，字符串类型) in object(对象值)
+
+其实，我们觉得直接传`window`对象进去不太妥当，因为我们的插件不一定就是运行在浏览器上，也可能是运行在一些非浏览器端上。所以我们不传参数，直接取当前的全局`this`对象作为顶级对象用。
+
+- 补充知识点
+- `Global`对象是`JavaScript`运行时所在的宿主提供的全局对象
+- `window`对象是`Global`对象在浏览器中的具体表现
+- `Global`对象是单体内置对象，即不依赖宿主环境的对象；而`window`对象依赖浏览器
+
+```JavaScript
+  ;(function (undefined) {
+    "use strict";
+
+    var global;
+
+    var plugin = {};
+
+    // 最后将插件对象暴露给全局对象
+    global = (function () {
+      return this || (0, eval)('this')
+    }());
+    !('plugin' in global) && (global.plugin = plugin);
+  })
+```
+
+对上面的代码进行解释一下：
+
+1. 上面代码中，我们不需要传入任何参数，并且解决了插件对环境的依赖性。我们的插件可以在任何宿主环境上运行了
+2. `(0, eval)('this')`，这段表达式用了`,`逗号操作符，逗号操作符总是返回表达式的最后一项。这个表达式实际执行结果相当于执行`eval('this')`
+
+- 补充知识点
+- 关于立即执行函数，有两种写法：
+- (function () {})()
+- (function () {}())  推荐写法
+- JavaScript中的()能够将代码结构变成表达式，变成表达式后可以立即执行
+- JavaScript中将代码变成表达式的方式：
+- void function () {}()
+- !function () {}()
+- +function () {}()
+- 以上三种方式不推荐用，乱用可能会产生歧义
+
+### 使用模块化的规范包装
+
+如果是多个人一起开发一个大型的插件呢？多人合作，肯定会产生多个文件，每个人负责一个小功能，那么如何才能将所有人开发的代码集合起来呢？要实现协作开发插件，必须具备如下条件：
+
+1. 每个功能互相之间的依赖必须要明确，必须严格按照依赖的顺序进行合并或加载
+2. 每个子功能分别都要是一个闭包，并且将公共的借口暴露到共享域，即一个被主函数暴露的公共对象
+
+如何实现？最笨的方法就是按顺序加载JavaScript文件，但是不推荐这么做，这与我们所追求的插件的封装性相悖。
+
+为了实现插件的模块化并且让我们的插件也是一个模块，我们就得让我们的插件也实现模块化机制。实际上，只要判断是否存在加载器，如果存在加载器，我们就使用加载器；如果不存在加载器，我们就使用顶级域对象。
+
+```JavaScript
+  ;(function (undefined) {
+    "use strict";
+
+    var global;
+
+    var plugin = {};
+
+    // 最后将插件对象暴露给全局对象
+    global = (function () {
+      return this || (0, eval)('this')
+    }());
+
+    if (typeof module !== 'undefined' && module.exports) {
+      module.exports = plugin;
+    } else if (typeof define === 'function' && define.amd) {
+      define(function () { return plugin });
+    } else {
+      !('plugin' in global) && (global.plugin = plugin);
+    }
+  }());
+```
+
+## 插件的默认参数
+
+插件是可以设置默认参数的，不管我们是否传参，我们都应该返回一个值以告诉使用者我们做了怎样的处理。
+
+如何实现插件的默认参数呢？
+
+```JavaScript
+  ;(function (undefined) {
+    "use strict";
+
+    var global;
+
+    function result(args, fn) {
+      var argsArr = Array.prototype.slice.call(args);
+      if (argsArr.length > 0) {
+        return argsArr.reduce(fn);
+      } else {
+        return 0;
+      }
+    }
+
+    var plugin = {
+      add: function () {
+        return result(arguments, function (per, cur) {
+          return pre + cur;
+        });
+      },
+      sub: function () {
+        return result(arguments, function (pre, cur) {
+          return pre - cur;
+        });
+      }
+    };
+
+    // 最后将插件对象暴露给全局对象
+    global = (function () {
+      return this || (0, eval)('this');
+    }());
+    // 模块加载
+    if (typeof module !== 'undefined' && module.exports) {
+      module.exports = plugin;
+    } else if (typeof define === 'function' && define.amd) {
+      define(function () { return plugin });
+    } else {
+      !('plugin' in global) && (global.plugin = plugin);
+    }
+  }());
+```
+
+插件的参数既然是默认的，就意味着我们可以随意修改参数以达到我们的需求，插件本身的意义就在于具有复用性。
+
+### 插件的钩子
+
+我们知道，设计一个插件，参数或者其逻辑肯定不是写死的，我们得像函数一样，让使用者用自己的参数实现需求，故我们的插件需要提供一个修改默认参数的入口。
+
+我们所说的修改默认参数，实际上也是插件给我提供的一个API，所谓的API就是插件暴露出来的方法及属性。
+
+在插件API中，我们常常将容易被修改和改动的方法或属性统称为钩子(Hook)，方法则直接叫钩子函数。
+
+### 插件的链式调用(利用当前对象)
+
+插件并非都是能链式调用的，有些时候，我们只是用钩子来实现一个计算并取出运算结果；但有些时候，我们用钩子来实现业务逻辑，为了代码简洁方便，我们常将插件按链式的方式调用。
+
+如何才能将链式调用运用到我们的插件中去呢？显然，我们只要将插件的当前对象`this`直接返回，这样在下一个方法中，就可以引用插件对象的其他钩子方法，调用时就可以使用链式方式了。
+
+### 插件的链式调用(利用原型链)
+
+`JavaScript`中，所有的对象都是继承自原型。`JavaScript`在创建对象(除null外)的时候，都有一个`_proto_`的内置属性，用于指向该对象的原型(该对象的构造函数的`prototype`属性也指向这个原型)。
+
+为了将链式调用运用到我们的插件中，我们可以将`plugin`对象改为原型的方式。这需要将`plugin`写成一个构造函数，我们将插件名更换为`Calculate`避免与`window`对象的属性冲突。
+
+```JavaScript
+  ;(function (undefined) {
+    "use strict";
+
+    var global;
+
+    function result (args, type) {
+      var argsArr = Array.prototype.slice.call(args);
+      if (argsArr.length === 0) return 0;
+
+      switch (type) {
+        case 'add':
+          return argsArr.reduce(function (per, cur) {
+            return per + cur;
+          });
+          break;
+        case 'sub':
+          return argsArr.reduce(function (per, cur) {
+            return per - sub;
+          });
+        default:
+          return 0;
+      }
+    }
+
+    function Calculate () {}
+    Calculate.prototype.add = function () {
+      result(arguments, 'add');
+      return this;
+    };
+    Calculate.prototype.sub = function () {
+      result(arguments, 'sub');
+      return this;
+    };
+
+    // 最后将插件对象暴露给全局对象
+    global = (function () {
+      return this || (0, eval)('this');
+    }());
+    if (typeof module !== 'undefined' && module.exports) {
+      module.exports = Calculate;
+    } else if (typeof define === 'function' && define.amd) {
+      define(function () { return Calculate });
+    } else {
+      !('Calculate' in global) && (global.Calculate = Calculate);
+    }
+  }())
+```
+
+这时调用我们的插件：
+
+```JavaScript
+  var plugin = new Calculate();
+  plugin.add(2, 1).sub(2, 1);
+```
+
+上面的例子没有太大的现实意义，不过在网页设计中，我们的插件基本上都是服务于UI层面，利用`JavaScript`实现一些可交互的效果，这时我们编写一个UI组件，实现过程使用链式调用。
+
+### 编写UI组件
+
+一般情况，如果一个`JavaScript`仅仅是处理一个逻辑，我们称之为插件；但是如果与DOM和CSS有关系切具备一定的交互性，我们称之为组件。
+
+利用原型链，将一些UI层面的业务代码封装在一个组件中，并利用`JavaScript`实现组件的交互性。
+
+在编写的过程中，我们得先做一些工具函数：
+
+1. 基础类型判断函数
+
+```JavaScript
+  function isFunction(obj) {
+    return typeof obj === "function" && typeof obj.nodeType !== "number";
+  }
+
+  function isPlainObject(obj) {
+    var toString = Object.prototype.toString;
+    var hasOwn = Object.prototype.hasOwnProperty;
+
+    var proto, Ctor;
+    if (!obj || toString.call(obj) !== "[object Object]") {
+      return false;
+    }
+
+    proto = Object.getPrototypeOf(obj);
+    if (!proto) {
+      return true;
+    }
+
+    Ctor = hasOwn.call(proto, "constructor") && proto.constructor;
+    return typeof Ctor === "function" && hasOwn.toString.call(Ctor) === hasOwn.toString.call(Object);
+  }
+```
+
+2. 对象合并函数 extend
+
+```JavaScript
+  function extend() {
+    // 默认不进行深拷贝
+    var deep = false;
+    var name, options, src, copy, clone, copyIsArray;
+    var length = arguments.length;
+    // 记录要复制的对象的下标
+    var i = 1;
+    // 第一个参数不传布尔值的情况下，target 默认是第一个参数
+    var target = arguments[0] || {};
+    // 如果第一个参数是布尔值，第二个参数是 target
+    if (typeof target == 'boolean') {
+      deep = target;
+      target = arguments[i] || {};
+      i++;
+    }
+    // 如果target不是对象，我们是无法进行复制的，所以设为 {}
+    if (typeof target !== "object" && !isFunction(target)) {
+      target = {};
+    }
+
+    // 循环遍历要复制的对象们
+    for (; i < length; i++) {
+      // 获取当前对象
+      options = arguments[i];
+      // 要求不能为空 避免 extend(a,,b) 这种情况
+      if (options != null) {
+        for (name in options) {
+          // 目标属性值
+          src = target[name];
+          // 要复制的对象的属性值
+          copy = options[name];
+
+          // 解决循环引用
+          if (target === copy) {
+            continue;
+          }
+
+          // 要递归的对象必须是 plainObject 或者数组
+          if (deep && copy && (isPlainObject(copy) ||
+              (copyIsArray = Array.isArray(copy)))) {
+            // 要复制的对象属性值类型需要与目标属性值相同
+            if (copyIsArray) {
+              copyIsArray = false;
+              clone = src && Array.isArray(src) ? src : [];
+            } else {
+              clone = src && isPlainObject(src) ? src : {};
+            }
+            target[name] = extend(deep, clone, copy);
+          } else if (copy !== undefined) {
+            target[name] = copy;
+          }
+        }
+      }
+    }
+    return target;
+  }
+```
+
+3. 自定义模板引擎函数
+
+```JavaScript
+  function templateEngine(html, data) {
+    var re = /<%([^%>]+)?%>/g,
+      reExp = /(^( )?(if|for|else|switch|case|break|{|}))(.*)?/g,
+      code = 'var r=[];\n',
+      cursor = 0;
+    var match;
+    var add = function(line, js) {
+      js ? (code += line.match(reExp) ? line + '\n' : 'r.push(' + line + ');\n') :
+        (code += line != '' ? 'r.push("' + line.replace(/"/g, '\\"') + '");\n' : '');
+      return add;
+    }
+    while (match = re.exec(html)) {
+      add(html.slice(cursor, match.index))(match[1], true);
+      cursor = match.index + match[0].length;
+    }
+    add(html.substr(cursor, html.length - cursor));
+    code += 'return r.join("");';
+    return new Function(code.replace(/[\r\t\n]/g, '')).apply(data);
+  }
+```
+
+4. 查找class获取DOM
+
+```JavaScript
+  if (!('getElementsByClass' in HTMLElement)) {
+    HTMLElement.prototype.getElementsByClass = function(n, tar) {
+      var el = [],
+        _el = (!!tar ? tar : this).getElementsByTagName('*');
+      for (var i = 0; i < _el.length; i++) {
+        if (!!_el[i].className && (typeof _el[i].className == 'string') && _el[i].className.indexOf(n) > -1) {
+          el[el.length] = _el[i];
+        }
+      }
+      return el;
+    };
+    ((typeof HTMLDocument !== 'undefined') ? HTMLDocument : Document).prototype.getElementsByClass = HTMLElement.prototype.getElementsByClass;
+  }
+```
+
+结合工具函数，再去实现具体逻辑结构：
+
+```JavaScript
+  // 插件构造函数 - 返回数组结构
+  function MyDialog(opt) {
+    this._initial(opt);
+  }
+  MyDialog.prototype = {
+  constructor: this,
+  _initial: function(opt) {
+    // 默认参数
+    var def = {
+      ok: true,
+      ok_txt: '确定',
+      cancel: false,
+      cancel_txt: '取消',
+      confirm: function() {},
+      close: function() {},
+      content: '',
+      tmpId: null
+    };
+    this.def = extend(def, opt, true);
+    this.tpl = this._parseTpl(this.def.tmpId);
+    this.dom = this._parseToDom(this.tpl)[0];
+    this.hasDom = false;
+  },
+  _parseTpl: function(tmpId) { // 将模板转为字符串
+    var data = this.def;
+    var tplStr = document.getElementById(tmpId).innerHTML.trim();
+    return templateEngine(tplStr, data);
+  },
+  _parseToDom: function(str) { // 将字符串转为dom
+    var div = document.createElement('div');
+    if (typeof str == 'string') {
+      div.innerHTML = str;
+    }
+    return div.childNodes;
+  },
+  show: function(callback) {
+    var _this = this;
+    if (this.hasDom) return;
+    document.body.appendChild(this.dom);
+    this.hasDom = true;
+    document.getElementsByClass('close', this.dom)[0].onclick = function() {
+      _this.hide();
+    };
+    document.getElementsByClass('btn-ok', this.dom)[0].onclick = function() {
+      _this.hide();
+    };
+    if (this.def.cancel) {
+      document.getElementsByClass('btn-cancel', this.dom)[0].onclick = function() {
+        _this.hide();
+      };
+    }
+    callback && callback();
+    return this;
+  },
+  hide: function(callback) {
+    document.body.removeChild(this.dom);
+    this.hasDom = false;
+    callback && callback();
+    return this;
+  },
+  modifyTpl: function(template) {
+    if (!!template) {
+      if (typeof template == 'string') {
+        this.tpl = template;
+      } else if (typeof template == 'function') {
+        this.tpl = template();
+      } else {
+        return this;
+      }
+    }
+    // this.tpl = this._parseTpl(this.def.tmpId);
+    this.dom = this._parseToDom(this.tpl)[0];
+    return this;
+  },
+  css: function(styleObj) {
+    for (var prop in styleObj) {
+      var attr = prop.replace(/[A-Z]/g, function(word) {
+        return '-' + word.toLowerCase();
+      });
+      this.dom.style[attr] = styleObj[prop];
+    }
+    return this;
+  },
+  width: function(val) {
+    this.dom.style.width = val + 'px';
+    return this;
+  },
+  height: function(val) {
+    this.dom.style.height = val + 'px';
+    return this;
+  }
+}
+```
+
+最终的代码：
+
+```JavaScript
+  ;(function(undefined) {
+  "use strict"
+  var _global;
+
+  // 工具函数
+  // 对象合并
+  function extend(o, n, override) {
+    for (var key in n) {
+      if (n.hasOwnProperty(key) && (!o.hasOwnProperty(key) || override)) {
+        o[key] = n[key];
+      }
+    }
+    return o;
+  }
+  // 自定义模板引擎
+  function templateEngine(html, data) {
+    var re = /<%([^%>]+)?%>/g,
+      reExp = /(^( )?(if|for|else|switch|case|break|{|}))(.*)?/g,
+      code = 'var r=[];\n',
+      cursor = 0;
+    var match;
+    var add = function(line, js) {
+      js ? (code += line.match(reExp) ? line + '\n' : 'r.push(' + line + ');\n') :
+        (code += line != '' ? 'r.push("' + line.replace(/"/g, '\\"') + '");\n' : '');
+      return add;
+    }
+    while (match = re.exec(html)) {
+      add(html.slice(cursor, match.index))(match[1], true);
+      cursor = match.index + match[0].length;
+    }
+    add(html.substr(cursor, html.length - cursor));
+    code += 'return r.join("");';
+    return new Function(code.replace(/[\r\t\n]/g, '')).apply(data);
+  }
+  // 通过class查找dom
+  if (!('getElementsByClass' in HTMLElement)) {
+    HTMLElement.prototype.getElementsByClass = function(n) {
+      var el = [],
+        _el = this.getElementsByTagName('*');
+      for (var i = 0; i < _el.length; i++) {
+        if (!!_el[i].className && (typeof _el[i].className == 'string') && _el[i].className.indexOf(n) > -1) {
+          el[el.length] = _el[i];
+        }
+      }
+      return el;
+    };
+    ((typeof HTMLDocument !== 'undefined') ? HTMLDocument : Document).prototype.getElementsByClass = HTMLElement.prototype.getElementsByClass;
+  }
+
+  // 插件构造函数 - 返回数组结构
+  function MyDialog(opt) {
+    this._initial(opt);
+  }
+  MyDialog.prototype = {
+    constructor: this,
+    _initial: function(opt) {
+      // 默认参数
+      var def = {
+        ok: true,
+        ok_txt: '确定',
+        cancel: false,
+        cancel_txt: '取消',
+        confirm: function() {},
+        close: function() {},
+        content: '',
+        tmpId: null
+      };
+      this.def = extend(def, opt, true); //配置参数
+      this.tpl = this._parseTpl(this.def.tmpId); //模板字符串
+      this.dom = this._parseToDom(this.tpl)[0]; //存放在实例中的节点
+      this.hasDom = false; //检查dom树中dialog的节点是否存在
+      this.listeners = []; //自定义事件，用于监听插件的用户交互
+      this.handlers = {};
+    },
+    _parseTpl: function(tmpId) { // 将模板转为字符串
+      var data = this.def;
+      var tplStr = document.getElementById(tmpId).innerHTML.trim();
+      return templateEngine(tplStr, data);
+    },
+    _parseToDom: function(str) { // 将字符串转为dom
+      var div = document.createElement('div');
+      if (typeof str == 'string') {
+        div.innerHTML = str;
+      }
+      return div.childNodes;
+    },
+    show: function(callback) {
+      var _this = this;
+      if (this.hasDom) return;
+      if (this.listeners.indexOf('show') > -1) {
+        if (!this.emit({
+            type: 'show',
+            target: this.dom
+          })) return;
+      }
+      document.body.appendChild(this.dom);
+      this.hasDom = true;
+      this.dom.getElementsByClass('close')[0].onclick = function() {
+        _this.hide();
+        if (_this.listeners.indexOf('close') > -1) {
+          _this.emit({
+            type: 'close',
+            target: _this.dom
+          })
+        }!!_this.def.close && _this.def.close.call(this, _this.dom);
+      };
+      this.dom.getElementsByClass('btn-ok')[0].onclick = function() {
+        _this.hide();
+        if (_this.listeners.indexOf('confirm') > -1) {
+          _this.emit({
+            type: 'confirm',
+            target: _this.dom
+          })
+        }!!_this.def.confirm && _this.def.confirm.call(this, _this.dom);
+      };
+      if (this.def.cancel) {
+        this.dom.getElementsByClass('btn-cancel')[0].onclick = function() {
+          _this.hide();
+          if (_this.listeners.indexOf('cancel') > -1) {
+            _this.emit({
+              type: 'cancel',
+              target: _this.dom
+            })
+          }
+        };
+      }
+      callback && callback();
+      if (this.listeners.indexOf('shown') > -1) {
+        this.emit({
+          type: 'shown',
+          target: this.dom
+        })
+      }
+      return this;
+    },
+    hide: function(callback) {
+      if (this.listeners.indexOf('hide') > -1) {
+        if (!this.emit({
+            type: 'hide',
+            target: this.dom
+          })) return;
+      }
+      document.body.removeChild(this.dom);
+      this.hasDom = false;
+      callback && callback();
+      if (this.listeners.indexOf('hidden') > -1) {
+        this.emit({
+          type: 'hidden',
+          target: this.dom
+        })
+      }
+      return this;
+    },
+    modifyTpl: function(template) {
+      if (!!template) {
+        if (typeof template == 'string') {
+          this.tpl = template;
+        } else if (typeof template == 'function') {
+          this.tpl = template();
+        } else {
+          return this;
+        }
+      }
+      this.dom = this._parseToDom(this.tpl)[0];
+      return this;
+    },
+    css: function(styleObj) {
+      for (var prop in styleObj) {
+        var attr = prop.replace(/[A-Z]/g, function(word) {
+          return '-' + word.toLowerCase();
+        });
+        this.dom.style[attr] = styleObj[prop];
+      }
+      return this;
+    },
+    width: function(val) {
+      this.dom.style.width = val + 'px';
+      return this;
+    },
+    height: function(val) {
+      this.dom.style.height = val + 'px';
+      return this;
+    },
+    on: function(type, handler) {
+      // type: show, shown, hide, hidden, close, confirm
+      if (typeof this.handlers[type] === 'undefined') {
+        this.handlers[type] = [];
+      }
+      this.listeners.push(type);
+      this.handlers[type].push(handler);
+      return this;
+    },
+    off: function(type, handler) {
+      if (this.handlers[type] instanceof Array) {
+        var handlers = this.handlers[type];
+        for (var i = 0, len = handlers.length; i < len; i++) {
+          if (handlers[i] === handler) {
+            break;
+          }
+        }
+        this.listeners.splice(i, 1);
+        handlers.splice(i, 1);
+        return this;
+      }
+    },
+    emit: function(event) {
+      if (!event.target) {
+        event.target = this;
+      }
+      if (this.handlers[event.type] instanceof Array) {
+        var handlers = this.handlers[event.type];
+        for (var i = 0, len = handlers.length; i < len; i++) {
+          handlers[i](event);
+          return true;
+        }
+      }
+      return false;
+    }
+  }
+
+  // 最后将插件对象暴露给全局对象
+  _global = (function() {
+    return this || (0, eval)('this');
+  }());
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = MyDialog;
+  } else if (typeof define === "function" && define.amd) {
+    define(function() {
+      return MyDialog;
+    });
+  } else {
+    !('MyDialog' in _global) && (_global.MyDialog = MyDialog);
+  }
+}());
+```
+
+调用：
+
+```JavaScript
+  var mydialog = new MyDialog({
+    tmpId: 'dialogTpl',
+    cancel: true,
+    content: 'hello world!'
+  });
+  mydialog.on('confirm',function(ev){
+    console.log('you click confirm!');
+    // 写你的确定之后的逻辑代码...
+  });
+  document.getElementById('test').onclick = function(){
+    mydialog.show();
+  }
+```
